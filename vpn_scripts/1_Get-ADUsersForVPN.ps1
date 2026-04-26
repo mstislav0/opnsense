@@ -159,21 +159,9 @@ foreach ($m in $members) {
             "$($u.SamAccountName)@lab.local"
         }
 
-        # Common Name для сертификата: Имя Фамилия или просто логин
-        $cn = if ($u.GivenName -and $u.Surname) {
-            "$($u.GivenName) $($u.Surname)"
-        } else {
-            $u.SamAccountName
-        }
-
         $userObjects.Add([PSCustomObject]@{
-            # username используется как имя файла и для матчинга CSO по CN
             username     = $u.SamAccountName
-            # commonname идёт в поле CN сертификата — именно по нему OpenVPN матчит CSO
-            commonname   = $cn
-            # email вписывается в Subject сертификата
             email        = $email
-            # для аудита — откуда взяли пользователя
             source_group = $selectedGroup.Name
         })
 
@@ -189,7 +177,7 @@ if ($userObjects.Count -eq 0) {
 
 Write-Host ""
 Write-Host "Итоговый список:" -ForegroundColor Cyan
-$userObjects | Format-Table -AutoSize username, commonname, email
+$userObjects | Format-Table -AutoSize username, email
 
 # ─────────────────────────────────────────────────────────────────────
 #  ШАГ 4 — СОХРАНЕНИЕ JSON

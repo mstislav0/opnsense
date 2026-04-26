@@ -3,20 +3,23 @@
 2_create_vpn_certs.py — запускается прямо на OPNsense.
 
 Что делает:
-  1. Читает JSON с пользователями (выход 1_Get-ADUsersForVPN.ps1)
-  2. Показывает список, запрашивает подтверждение
-  3. Для каждого пользователя создаёт через OPNsense API:
+  1. Запрашивает API Key и API Secret (или берёт из переменных окружения)
+  2. Читает JSON с пользователями (выход 1_Get-ADUsersForVPN.ps1)
+  3. Показывает список доступных CA, пользователь выбирает нужный
+  4. Запрашивает подтверждение перед созданием
+  5. Для каждого пользователя создаёт через OPNsense API:
      - клиентский сертификат (CN = username)
-     - Client Specific Override (CSO) через /api/openvpn/client_overwrites/add
-  4. Выводит итог
+     - local user с привязкой сертификата (для Client Export)
+     - Client Specific Override (CSO)
+  6. Выводит итог
 
-После выполнения:
-  Web UI → VPN → OpenVPN → Client Specific Overrides  — список CSO
-  Web UI → VPN → OpenVPN → Client Export              — скачать .ovpn
+Переменные окружения (опционально, чтобы не вводить каждый раз):
+  OPNSENSE_API_KEY    — API Key
+  OPNSENSE_API_SECRET — API Secret
 
 Запуск:
-  python3 /opt/vpn_scripts/2_create_vpn_certs.py users.json
-  python3 /opt/vpn_scripts/2_create_vpn_certs.py --yes users.json
+  python3 2_create_vpn_certs.py users.json
+  python3 2_create_vpn_certs.py --yes users.json
 """
 
 import sys
@@ -29,27 +32,31 @@ import urllib.error
 import time
 import secrets
 import string
-import xml.etree.ElementTree as ET
 
 # ─────────────────────────────────────────────────────────────────────
-#  НАСТРОЙКИ — заполнить под свою инсталляцию
+#  КОНСТАНТЫ
 # ─────────────────────────────────────────────────────────────────────
 
-API_KEY       = "7gWamJvP0dMXAzvgRQE61CWEvUSfqB_Muai8gW4oQrg"
-API_SECRET    = "lzmB7BGIkAq2xsQSscyGGDDv_Hfcw5tJUhIfSxXhke0"
 BASE_URL      = "https://127.0.0.1"
-
-# refid CA (System → Trust → Authorities)
-CA_REFID      = "69ecf4fe169ec"
-
-# vpnid OpenVPN сервера из config.xml → <openvpn-server> → <vpnid>
-VPN_ID        = "1"
-
 CERT_KEYTYPE  = "RSA"
 CERT_KEYLEN   = "2048"
 CERT_DIGEST   = "sha256"
 CERT_LIFETIME = "365"
-CONFIG_XML    = "/conf/config.xml"
+
+# ─────────────────────────────────────────────────────────────────────
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ─────────────────────────────────────────────────────────────────────
+
+def random_password(length=16):
+    chars = string.ascii_letters + string.digits + "!@#$"
+    return ''.join(secrets.choice(chars) for _ in range(length))
+
+def header(text):
+    print(f"\n{'='*60}\n  {text}\n{'='*60}\n")
+
+def ok(text):   print(f"  [OK]   {text}")
+def warn(text): print(f"  [WARN] {text}")
+def err(text):  print(f"  [ERR]  {text}")
 
 # ─────────────────────────────────────────────────────────────────────
 #  API-КЛИЕНТ
@@ -58,24 +65,17 @@ CONFIG_XML    = "/conf/config.xml"
 _ssl_ctx = ssl.create_default_context()
 _ssl_ctx.check_hostname = False
 _ssl_ctx.verify_mode    = ssl.CERT_NONE
-_auth = "Basic " + base64.b64encode(f"{API_KEY}:{API_SECRET}".encode()).decode()
+
+_auth = None  # инициализируется после ввода credentials
 
 
 def api(path, method="GET", body=None):
     """
     REST-запрос к OPNsense API.
-
-    OPNsense quirks:
-    - search-endpoints: POST без тела (пустой JSON {} даёт 400)
-    - add-endpoints: POST с JSON-телом
+    search-endpoints: POST без тела (пустой JSON {} даёт 400).
+    add-endpoints: POST с JSON-телом.
     """
-    if method == "POST" and body is not None:
-        data = json.dumps(body).encode()
-    elif method == "POST":
-        data = None   # search — без тела
-    else:
-        data = None
-
+    data = json.dumps(body).encode() if (method == "POST" and body is not None) else None
     req = urllib.request.Request(BASE_URL + path, data=data, method=method)
     req.add_header("Authorization", _auth)
     if data:
@@ -90,24 +90,6 @@ def api(path, method="GET", body=None):
         print(f"  [ERR] {path} — {e}")
         return None
 
-
-# ─────────────────────────────────────────────────────────────────────
-#  ВЫВОД
-# ─────────────────────────────────────────────────────────────────────
-
-def random_password(length=16):
-    chars = string.ascii_letters + string.digits + "!@#$"
-    return ''.join(secrets.choice(chars) for _ in range(length))
-
-
-def header(text):
-    print(f"\n{'='*60}\n  {text}\n{'='*60}\n")
-
-def ok(text):   print(f"  [OK]   {text}")
-def warn(text): print(f"  [WARN] {text}")
-def err(text):  print(f"  [ERR]  {text}")
-
-
 # ─────────────────────────────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────
@@ -117,9 +99,41 @@ args     = [a for a in sys.argv[1:] if a != "--yes"]
 
 header("Создание VPN-сертификатов и CSO в OPNsense")
 
+# ── Шаг 0: API credentials ───────────────────────────────────────────
+
+header("Шаг 0: API-доступ")
+
+api_key = os.environ.get("OPNSENSE_API_KEY", "").strip()
+api_secret = os.environ.get("OPNSENSE_API_SECRET", "").strip()
+
+if api_key:
+    print(f"  API Key    : (из переменной окружения)")
+else:
+    api_key = input("  API Key    : ").strip()
+
+if api_secret:
+    print(f"  API Secret : (из переменной окружения)")
+else:
+    api_secret = input("  API Secret : ").strip()
+
+if not api_key or not api_secret:
+    err("API Key и API Secret обязательны.")
+    sys.exit(1)
+
+_auth = "Basic " + base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
+
+# Проверяем доступ
+test = api("/api/trust/ca/search", method="POST")
+if test is None:
+    err("Не удалось подключиться к OPNsense API. Проверьте ключи.")
+    sys.exit(1)
+ok("Подключение к API успешно")
+
 # ── Шаг 1: загрузка JSON ─────────────────────────────────────────────
 
-json_path = args[0] if args else input("Путь к JSON-файлу: ").strip().strip('"')
+header("Шаг 1: Пользователи")
+
+json_path = args[0] if args else input("  Путь к JSON-файлу: ").strip().strip('"')
 
 if not os.path.isfile(json_path):
     err(f"Файл не найден: {json_path}")
@@ -148,21 +162,65 @@ if not users:
     err("Нет валидных записей.")
     sys.exit(1)
 
-header("Шаг 1: Пользователи")
 print(f"  Файл    : {json_path}")
 print(f"  Записей : {len(users)}")
 
-# ── Шаг 2: предпросмотр и подтверждение ──────────────────────────────
+# ── Шаг 2: выбор CA ──────────────────────────────────────────────────
 
-header("Шаг 2: Подтверждение")
+header("Шаг 2: Выбор CA")
+
+ca_rows = test.get("rows", [])
+if not ca_rows:
+    err("Нет доступных CA. Создайте CA в System → Trust → Authorities.")
+    sys.exit(1)
+
+print(f"  Доступные CA:\n")
+print(f"  {'#':<4} {'Название':<35} {'refid'}")
+print(f"  {'-'*4} {'-'*35} {'-'*15}")
+for i, ca in enumerate(ca_rows, 1):
+    print(f"  {i:<4} {ca.get('descr', '?'):<35} {ca.get('refid', '?')}")
+
+print()
+if len(ca_rows) == 1:
+    chosen_ca = ca_rows[0]
+    print(f"  Найден один CA — выбран автоматически: '{chosen_ca.get('descr')}'")
+else:
+    while True:
+        try:
+            choice = int(input(f"  Введите номер CA (1-{len(ca_rows)}): ").strip())
+            if 1 <= choice <= len(ca_rows):
+                chosen_ca = ca_rows[choice - 1]
+                break
+        except ValueError:
+            pass
+        print(f"  [!] Введите число от 1 до {len(ca_rows)}.")
+
+CA_REFID = chosen_ca["refid"]
+ok(f"CA: '{chosen_ca.get('descr')}' (refid={CA_REFID})")
+
+# ── Шаг 3: получаем VPN ID ───────────────────────────────────────────
+
+vpn_resp = api("/api/openvpn/instances/search", method="POST")
+vpn_rows = (vpn_resp or {}).get("rows", [])
+if not vpn_rows:
+    err("Нет OpenVPN серверов. Создайте сервер в VPN → OpenVPN → Instances.")
+    sys.exit(1)
+
+VPN_ID = str(vpn_rows[0].get("vpnid", vpn_rows[0].get("uuid", "1")))
+ok(f"OpenVPN сервер: '{vpn_rows[0].get('description', vpn_rows[0].get('role', '?'))}' (id={VPN_ID})")
+
+# ── Шаг 4: предпросмотр и подтверждение ──────────────────────────────
+
+header("Шаг 3: Подтверждение")
 
 print(f"  {'#':<4} {'username':<20} {'email'}")
 print(f"  {'-'*4} {'-'*20} {'-'*35}")
 for i, u in enumerate(users, 1):
     print(f"  {i:<4} {u['username']:<20} {u['email']}")
 
-print(f"\n  Будет создано: {len(users)} сертификатов + {len(users)} CSO")
-print(f"  CA refid : {CA_REFID}  |  VPN ID : {VPN_ID}\n")
+print(f"\n  Будет создано: {len(users)} сертификатов + {len(users)} local users + {len(users)} CSO")
+print(f"  CA    : {chosen_ca.get('descr')} (refid={CA_REFID})")
+print(f"  VPN ID: {VPN_ID}\n")
 
 if AUTO_YES:
     print("  Создать? [y/N]: y (--yes)")
@@ -170,45 +228,17 @@ elif input("  Создать? [y/N]: ").strip().lower() not in ("y", "yes", "д"
     print("Отменено.")
     sys.exit(0)
 
-# ── Шаг 3: проверка API ───────────────────────────────────────────────
-
-header("Шаг 3: Проверка")
-
-# Проверяем CA (search → POST без тела)
-ca_resp = api("/api/trust/ca/search", method="POST")
-if ca_resp is None:
-    err("Нет доступа к OPNsense API.")
-    sys.exit(1)
-
-ca = next((r for r in ca_resp.get("rows", []) if r.get("refid") == CA_REFID), None)
-if not ca:
-    err(f"CA refid='{CA_REFID}' не найден. Доступные:")
-    for r in ca_resp.get("rows", []):
-        print(f"    refid={r.get('refid')}  descr={r.get('descr')}")
-    sys.exit(1)
-ok(f"CA: '{ca.get('descr')}'")
-
-# Проверяем OpenVPN сервер в config.xml
-srv = next((s for s in ET.parse(CONFIG_XML).getroot().findall(".//openvpn-server")
-            if s.findtext("vpnid") == VPN_ID), None)
-if srv is None:
-    err(f"OpenVPN сервер vpnid={VPN_ID} не найден в config.xml.")
-    sys.exit(1)
-ok(f"OpenVPN сервер: '{srv.findtext('description')}'")
-
-# Загружаем существующие CSO чтобы не дублировать
-existing_cso = api("/api/openvpn/client_overwrites/search", method="POST")
-existing_cns = {r["common_name"] for r in (existing_cso or {}).get("rows", [])}
-ok(f"Существующих CSO: {len(existing_cns)}")
-
-# Загружаем существующих local users чтобы не дублировать
-existing_users_resp = api("/api/auth/user/search", method="POST")
-existing_usernames = {r["name"] for r in (existing_users_resp or {}).get("rows", [])}
-ok(f"Существующих local users: {len(existing_usernames)}")
-
-# ── Шаг 4: создание сертификатов и CSO ───────────────────────────────
+# ── Шаг 5: проверка существующих записей ─────────────────────────────
 
 header("Шаг 4: Создание")
+
+existing_cso = api("/api/openvpn/client_overwrites/search", method="POST")
+existing_cns = {r["common_name"] for r in (existing_cso or {}).get("rows", [])}
+
+existing_users_resp = api("/api/auth/user/search", method="POST")
+existing_usernames = {r["name"] for r in (existing_users_resp or {}).get("rows", [])}
+
+# ── Шаг 6: создание ──────────────────────────────────────────────────
 
 results = []
 
@@ -220,12 +250,12 @@ for i, user in enumerate(users, 1):
     cert = api("/api/trust/cert/add", method="POST", body={
         "cert": {
             "descr":           username,
-            "caref":           CA_REFID,       # refid, не uuid!
+            "caref":           CA_REFID,
             "keytype":         CERT_KEYTYPE,
             "keylen":          CERT_KEYLEN,
             "digest_alg":      CERT_DIGEST,
             "lifetime":        CERT_LIFETIME,
-            "dn_commonname":   username,       # CN = username — по нему OpenVPN матчит CSO
+            "dn_commonname":   username,
             "dn_email":        user["email"],
             "dn_country":      "RU",
             "dn_state":        "Moscow",
@@ -237,44 +267,46 @@ for i, user in enumerate(users, 1):
     })
 
     if not cert or cert.get("result") != "saved":
-        err(f"Не удалось создать сертификат")
-        results.append({"username": username, "cert": "FAILED", "cso": "SKIPPED", "local_user": "SKIPPED"})
+        err("Не удалось создать сертификат")
+        results.append({"username": username, "cert": "FAILED", "local_user": "SKIPPED", "cso": "SKIPPED"})
         continue
     cert_uuid = cert.get("uuid", "")
     ok(f"Сертификат (uuid={cert_uuid})")
     time.sleep(0.3)
 
-    # Local user (нужен для Client Export в Web UI)
+    # Local user
     if username in existing_usernames:
-        warn(f"Local user уже существует — пропускаем")
+        warn("Local user уже существует — пропускаем")
+        local_user_status = "EXISTS"
     else:
         local_user = api("/api/auth/user/add", method="POST", body={
             "user": {
                 "name":        username,
-                "password":    random_password(),   # случайный — VPN авторизуется по сертификату
+                "password":    random_password(),
                 "email":       user["email"],
-                "certificate": cert_uuid,           # привязываем → появится в Client Export
+                "certificate": cert_uuid,
                 "disabled":    "0",
             }
         })
         if local_user and local_user.get("result") == "saved":
             ok(f"Local user (uuid={local_user.get('uuid', '?')})")
             existing_usernames.add(username)
+            local_user_status = "OK"
         else:
             warn(f"Local user не создан: {local_user}")
+            local_user_status = "FAILED"
     time.sleep(0.2)
 
     # CSO
     if username in existing_cns:
-        warn(f"CSO уже существует — пропускаем")
-        results.append({"username": username, "cert": "OK", "cso": "EXISTS", "local_user": "EXISTS"})
+        warn("CSO уже существует — пропускаем")
+        results.append({"username": username, "cert": "OK", "local_user": local_user_status, "cso": "EXISTS"})
         continue
 
-    # Поле называется "cso" (не "client_overwrites") — так требует модель OPNsense
     cso = api("/api/openvpn/client_overwrites/add", method="POST", body={
         "cso": {
             "enabled":          "1",
-            "common_name":      username,   # матчится с CN сертификата при подключении
+            "common_name":      username,
             "servers":          VPN_ID,
             "description":      f"VPN {username} ({user['source_group']})",
             "tunnel_network":   "",
@@ -291,27 +323,26 @@ for i, user in enumerate(users, 1):
     if cso and cso.get("result") == "saved":
         ok(f"CSO (uuid={cso.get('uuid', '?')})")
         existing_cns.add(username)
-        results.append({"username": username, "cert": "OK", "cso": "OK", "local_user": "OK"})
+        results.append({"username": username, "cert": "OK", "local_user": local_user_status, "cso": "OK"})
     else:
         warn(f"CSO не создан: {cso}")
-        results.append({"username": username, "cert": "OK", "cso": "FAILED", "local_user": "OK"})
+        results.append({"username": username, "cert": "OK", "local_user": local_user_status, "cso": "FAILED"})
 
     time.sleep(0.2)
 
-# ── Шаг 5: итог ──────────────────────────────────────────────────────
+# ── Итог ─────────────────────────────────────────────────────────────
 
 header("Итог")
 
 cert_ok = sum(1 for r in results if r["cert"] == "OK")
+user_ok = sum(1 for r in results if r["local_user"] in ("OK", "EXISTS"))
 cso_ok  = sum(1 for r in results if r["cso"] in ("OK", "EXISTS"))
-user_ok = sum(1 for r in results if r.get("local_user") in ("OK", "EXISTS"))
 
 print(f"  Обработано   : {len(results)}")
 print(f"  Сертификатов : {cert_ok}/{len(results)}")
 print(f"  Local users  : {user_ok}/{len(results)}")
 print(f"  CSO записей  : {cso_ok}/{len(results)}")
 
-# Финальный счёт из API
 final = api("/api/openvpn/client_overwrites/search", method="POST")
 if final:
     print(f"  CSO в Web UI : {final.get('total', '?')}")
