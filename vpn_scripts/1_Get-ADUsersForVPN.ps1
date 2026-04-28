@@ -208,5 +208,7 @@ Write-Host "  Пользователей : $($userObjects.Count)"    -Foreground
 Write-Host "  Файл          : $outputPath"              -ForegroundColor Green
 Write-Host ""
 Write-Host "Следующий шаг: скопируйте файл на OPNsense и запустите:" -ForegroundColor Cyan
-Write-Host "  python3 /opt/vpn_scripts/2_create_vpn_certs.py $outputFile" -ForegroundColor Yellow
+Write-Host "  python3 /root/2_create_vpn_certs.py $outputFile" -ForegroundColor Yellow
+Write-Host "  # или без интерактива:" -ForegroundColor DarkGray
+Write-Host "  python3 /root/2_create_vpn_certs.py --yes --tunnel 10.8.X.0/24 --ca VPN-CA-Name $outputFile" -ForegroundColor DarkGray
 Write-Host ""
