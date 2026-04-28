@@ -18,13 +18,15 @@ Local users НЕ создаются — для появления в Client Expo
 сопоставляются OpenVPN-сервером по CN в рантайме.
 
 Переменные окружения (опционально):
-  OPNSENSE_API_KEY    — API Key
-  OPNSENSE_API_SECRET — API Secret
-  OPNSENSE_BASE_URL   — по умолчанию https://127.0.0.1 (запуск на сервере)
+  OPNSENSE_API_KEY        — API Key
+  OPNSENSE_API_SECRET     — API Secret
+  OPNSENSE_BASE_URL       — по умолчанию https://127.0.0.1 (запуск на сервере)
+  OPNSENSE_TUNNEL_NETWORK — CIDR-подсеть для IPv4 Tunnel Network в CSO
+  OPNSENSE_CA             — descr или refid CA для подписания (для --yes режима)
 
 Запуск:
   python3 2_create_vpn_certs.py users.json
-  python3 2_create_vpn_certs.py --yes users.json
+  python3 2_create_vpn_certs.py --yes --tunnel 10.8.10.0/24 --ca VPN-Lab-CA users.json
 """
 
 import sys
@@ -87,7 +89,34 @@ def api(path, method="GET", body=None):
 # ─────────────────────────────────────────────────────────────────────
 
 AUTO_YES = "--yes" in sys.argv
-args     = [a for a in sys.argv[1:] if a != "--yes"]
+
+TUNNEL_FROM_CLI = ""
+CA_FROM_CLI     = ""
+_remaining = []
+_skip = False
+_argv_tail = sys.argv[1:]
+for i, a in enumerate(_argv_tail):
+    if _skip:
+        _skip = False
+        continue
+    if a == "--yes":
+        continue
+    if a == "--tunnel" and i + 1 < len(_argv_tail):
+        TUNNEL_FROM_CLI = _argv_tail[i + 1].strip()
+        _skip = True
+        continue
+    if a.startswith("--tunnel="):
+        TUNNEL_FROM_CLI = a.split("=", 1)[1].strip()
+        continue
+    if a == "--ca" and i + 1 < len(_argv_tail):
+        CA_FROM_CLI = _argv_tail[i + 1].strip()
+        _skip = True
+        continue
+    if a.startswith("--ca="):
+        CA_FROM_CLI = a.split("=", 1)[1].strip()
+        continue
+    _remaining.append(a)
+args = _remaining
 
 header("Создание VPN-сертификатов и CSO в OPNsense")
 
@@ -141,6 +170,32 @@ if not users:
 print(f"  Файл    : {json_path}")
 print(f"  Записей : {len(users)}")
 
+# ── Шаг 1.5: tunnel network для CSO ──────────────────────────────────
+
+header("Шаг 1.5: IPv4 Tunnel Network для CSO")
+
+def _valid_cidr(v):
+    return v == "" or ("/" in v and v.count(".") == 3)
+
+TUNNEL_NETWORK = (TUNNEL_FROM_CLI or os.environ.get("OPNSENSE_TUNNEL_NETWORK", "")).strip()
+
+if TUNNEL_NETWORK:
+    if not _valid_cidr(TUNNEL_NETWORK):
+        err(f"Неверный формат tunnel network: {TUNNEL_NETWORK}")
+        sys.exit(1)
+    print(f"  IPv4 Tunnel Network: {TUNNEL_NETWORK} (из аргумента/ENV)")
+elif AUTO_YES:
+    print("  IPv4 Tunnel Network: (не задана, --yes без --tunnel)")
+else:
+    print("  Подсеть в формате CIDR (например 10.8.10.0/24).")
+    print("  Будет применена ко всем создаваемым CSO. Пусто — без подсети.\n")
+    while True:
+        val = input("  IPv4 Tunnel Network: ").strip()
+        if _valid_cidr(val):
+            TUNNEL_NETWORK = val
+            break
+        print("  [!] Неверный формат, ожидается X.X.X.X/Y.")
+
 # ── Шаг 2: выбор CA ──────────────────────────────────────────────────
 
 header("Шаг 2: Выбор CA")
@@ -156,9 +211,24 @@ for i, ca in enumerate(ca_rows, 1):
     print(f"  {i:<4} {ca.get('descr', '?'):<35} {ca.get('refid', '?')}")
 print()
 
-if len(ca_rows) == 1:
+CA_HINT = (CA_FROM_CLI or os.environ.get("OPNSENSE_CA", "")).strip()
+
+chosen_ca = None
+if CA_HINT:
+    for ca in ca_rows:
+        if ca.get("refid") == CA_HINT or ca.get("descr") == CA_HINT:
+            chosen_ca = ca
+            break
+    if not chosen_ca:
+        err(f"CA не найден по '{CA_HINT}' (ни refid, ни descr).")
+        sys.exit(1)
+    print(f"  CA по аргументу/ENV: '{chosen_ca.get('descr')}'")
+elif len(ca_rows) == 1:
     chosen_ca = ca_rows[0]
     print(f"  Найден один CA — выбран автоматически: '{chosen_ca.get('descr')}'")
+elif AUTO_YES:
+    err("Несколько CA, --yes без --ca / OPNSENSE_CA — нечего выбрать.")
+    sys.exit(1)
 else:
     while True:
         try:
@@ -194,8 +264,9 @@ for i, u in enumerate(users, 1):
     print(f"  {i:<4} {u['username']:<25} {u['email']}")
 
 print(f"\n  Будет создано: {len(users)} сертификатов + {len(users)} CSO")
-print(f"  CA    : {chosen_ca.get('descr')} (refid={CA_REFID})")
-print(f"  VPN ID: {VPN_ID}\n")
+print(f"  CA            : {chosen_ca.get('descr')} (refid={CA_REFID})")
+print(f"  VPN ID        : {VPN_ID}")
+print(f"  Tunnel Network: {TUNNEL_NETWORK or '(не задана)'}\n")
 
 if AUTO_YES:
     print("  Создать? [y/N]: y (--yes)")
@@ -259,10 +330,11 @@ for i, user in enumerate(users, 1):
 
     cso = api("/api/openvpn/client_overwrites/add", method="POST", body={
         "cso": {
-            "enabled":     "1",
-            "common_name": username,
-            "servers":     VPN_ID,
-            "description": f"VPN {username} ({user['source_group']})",
+            "enabled":        "1",
+            "common_name":    username,
+            "servers":        VPN_ID,
+            "description":    f"VPN {username} ({user['source_group']})",
+            "tunnel_network": TUNNEL_NETWORK,
         }
     })
     if cso and cso.get("result") == "saved":
