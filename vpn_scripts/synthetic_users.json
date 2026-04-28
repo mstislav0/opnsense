@@ -1,0 +1,12 @@
+[
+  {"username": "ivanov.ivan",      "email": "ivanov.ivan@lab.local",      "source_group": "VPN-Users"},
+  {"username": "petrov.petr",      "email": "petrov.petr@lab.local",      "source_group": "VPN-Users"},
+  {"username": "sidorov.sergey",   "email": "sidorov.sergey@lab.local",   "source_group": "VPN-Users"},
+  {"username": "kuznetsov.alexey", "email": "kuznetsov.alexey@lab.local", "source_group": "VPN-Users"},
+  {"username": "smirnov.dmitry",   "email": "smirnov.dmitry@lab.local",   "source_group": "VPN-Users"},
+  {"username": "popov.pavel",      "email": "popov.pavel@lab.local",      "source_group": "VPN-Users"},
+  {"username": "sokolov.stanislav","email": "sokolov.stanislav@lab.local","source_group": "VPN-Users"},
+  {"username": "lebedev.leonid",   "email": "lebedev.leonid@lab.local",   "source_group": "VPN-Users"},
+  {"username": "kozlov.konstantin","email": "kozlov.konstantin@lab.local","source_group": "VPN-Users"},
+  {"username": "novikov.nikolay",  "email": "novikov.nikolay@lab.local",  "source_group": "VPN-Users"}
+]
