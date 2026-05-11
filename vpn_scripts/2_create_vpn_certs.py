@@ -31,6 +31,11 @@ import base64
 import urllib.request
 import urllib.error
 import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 # ─────────────────────────────────────────────────────────────────────
 #  КОНСТАНТЫ
@@ -383,6 +388,146 @@ def mode_download(users):
     print(f"  Папка    : {out_dir}")
     print()
 
+    if downloaded > 0:
+        ans = input("  Разослать .ovpn файлы на почту? [Y/n]: ").strip().lower()
+        if ans in ("", "y", "yes", "д", "да"):
+            mode_send(users, out_dir)
+
+# ─────────────────────────────────────────────────────────────────────
+#  РЕЖИМ 3: ОТПРАВКА .ovpn НА ПОЧТУ
+# ─────────────────────────────────────────────────────────────────────
+
+TEMPLATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_template.txt")
+
+
+def load_email_template():
+    if not os.path.isfile(TEMPLATE_FILE):
+        err(f"Шаблон письма не найден: {TEMPLATE_FILE}")
+        sys.exit(1)
+    with open(TEMPLATE_FILE, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    subject = ""
+    body_lines = []
+    in_body = False
+    for line in lines:
+        if not in_body and line.lower().startswith("subject:"):
+            subject = line.split(":", 1)[1].strip()
+        elif not in_body and line.strip() == "" and subject:
+            in_body = True
+        elif in_body:
+            body_lines.append(line)
+
+    return subject, "\n".join(body_lines).strip()
+
+
+def mode_send(users, ovpn_dir):
+    header("Отправка .ovpn на почту")
+
+    subject, body = load_email_template()
+    ok(f"Шаблон загружен: тема «{subject}»")
+
+    print()
+    smtp_host = input("  SMTP сервер  : ").strip()
+    smtp_port = input("  SMTP порт    : ").strip()
+    smtp_user = input("  Логин        : ").strip()
+    smtp_pass = input("  Пароль       : ").strip()
+    from_addr = input(f"  От кого (Enter = {smtp_user}): ").strip() or smtp_user
+    print()
+
+    if not smtp_host or not smtp_port or not smtp_user or not smtp_pass:
+        err("Все поля SMTP обязательны.")
+        return
+
+    try:
+        smtp_port_int = int(smtp_port)
+    except ValueError:
+        err("Порт должен быть числом.")
+        return
+
+    # Предпросмотр
+    no_email = [u for u in users if not u["email"]]
+    to_send  = [u for u in users if u["email"]]
+
+    if no_email:
+        warn(f"Без email ({len(no_email)} чел.) — пропустим: " + ", ".join(u["username"] for u in no_email))
+
+    if not to_send:
+        err("Ни у одного пользователя нет email.")
+        return
+
+    print(f"  Будет отправлено: {len(to_send)} писем")
+    if input("  Отправить? [y/N]: ").strip().lower() not in ("y", "yes", "д", "да"):
+        print("Отменено.")
+        return
+
+    # Подключение к SMTP
+    try:
+        if smtp_port_int == 465:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port_int, timeout=15)
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port_int, timeout=15)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        server.login(smtp_user, smtp_pass)
+        ok("Подключение к SMTP успешно")
+    except Exception as e:
+        err(f"Не удалось подключиться к SMTP: {e}")
+        return
+
+    sent    = 0
+    failed  = 0
+
+    for i, user in enumerate(to_send, 1):
+        username = user["username"]
+        email    = user["email"]
+        print(f"\n  [{i}/{len(to_send)}] {username} → {email}", end="")
+
+        # Ищем файл в ovpn_dir
+        ovpn_path = None
+        for fname in os.listdir(ovpn_dir):
+            if fname.endswith(".ovpn") and username.replace(".", "_") in fname.replace(".", "_"):
+                ovpn_path = os.path.join(ovpn_dir, fname)
+                break
+
+        if not ovpn_path:
+            print()
+            warn(f".ovpn файл не найден в {ovpn_dir} — пропускаем")
+            failed += 1
+            continue
+
+        msg = MIMEMultipart()
+        msg["From"]    = from_addr
+        msg["To"]      = email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        with open(ovpn_path, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f'attachment; filename="{os.path.basename(ovpn_path)}"')
+        msg.attach(part)
+
+        try:
+            server.sendmail(from_addr, email, msg.as_string())
+            print(f"  ✓")
+            sent += 1
+        except Exception as e:
+            print()
+            warn(f"Ошибка отправки: {e}")
+            failed += 1
+
+    server.quit()
+
+    header("Итог рассылки")
+    print(f"  Отправлено : {sent}/{len(to_send)}")
+    if failed:
+        print(f"  Ошибок     : {failed}")
+    print()
+
+
 # ─────────────────────────────────────────────────────────────────────
 #  ТОЧКА ВХОДА
 # ─────────────────────────────────────────────────────────────────────
@@ -412,13 +557,20 @@ print(f"  Записей : {len(users)}")
 header("Выбор режима")
 print("  1. Создать сертификаты и CSO")
 print("  2. Скачать .ovpn файлы")
+print("  3. Разослать .ovpn файлы на почту")
 print()
 
 mode = ""
-while mode not in ("1", "2"):
-    mode = input("  Введите номер (1 или 2): ").strip()
+while mode not in ("1", "2", "3"):
+    mode = input("  Введите номер (1, 2 или 3): ").strip()
 
 if mode == "1":
     mode_create(users, ca_resp)
-else:
+elif mode == "2":
     mode_download(users)
+else:
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovpn_files")
+    if not os.path.isdir(out_dir) or not any(f.endswith(".ovpn") for f in os.listdir(out_dir)):
+        err(f"Папка {out_dir} пуста или не существует. Сначала скачайте файлы (режим 2).")
+        sys.exit(1)
+    mode_send(users, out_dir)
