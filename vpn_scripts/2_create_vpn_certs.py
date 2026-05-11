@@ -315,6 +315,10 @@ def mode_create(users, ca_resp):
     print(f"  Web UI: https://{host}/ui/openvpn/export")
     print()
 
+    ans = input("  Загрузить .ovpn файлы? [Y/n]: ").strip().lower()
+    if ans in ("", "y", "yes", "д", "да"):
+        mode_download(users)
+
 # ─────────────────────────────────────────────────────────────────────
 #  РЕЖИМ 2: СКАЧИВАНИЕ .ovpn ФАЙЛОВ
 # ─────────────────────────────────────────────────────────────────────
