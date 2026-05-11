@@ -4,35 +4,42 @@
 
 Что делает:
   1. Берёт API Key/Secret из переменных окружения или спрашивает.
-  2. Читает JSON с пользователями (выход 1_Get-ADUsersForVPN.ps1).
+  2. Читает CSV-файл с пользователями: login;ip;email
+     - ip   — CIDR (например 10.8.0.1/32), прописывается в tunnel_network CSO
+     - email — опционально, если пусто — остаётся пустым
   3. Показывает список доступных CA, пользователь выбирает нужный
      (или авто, если CA один).
   4. Запрашивает подтверждение перед созданием.
   5. Для каждого пользователя:
-     - создаёт клиентский сертификат (CN = username, подписан выбранным CA)
-     - создаёт Client Specific Override (common_name = username)
+     - создаёт клиентский сертификат (CN = login, подписан выбранным CA)
+     - создаёт Client Specific Override (common_name = login, tunnel_network = ip)
   6. Применяет конфигурацию OpenVPN, чтобы Client Export сразу видел сертификаты.
 
 Local users НЕ создаются — для появления в Client Export достаточно, чтобы
 сертификат был подписан тем же CA, что и OpenVPN-сервер. CSO ↔ сертификат
 сопоставляются OpenVPN-сервером по CN в рантайме.
 
+Формат CSV (разделитель ;):
+  login;ip;email
+  ivanov.ivan;10.8.0.1/32;ivanov@company.ru
+  petrov.petr;10.8.0.2/32;
+
 Переменные окружения (опционально):
-  OPNSENSE_API_KEY        — API Key
-  OPNSENSE_API_SECRET     — API Secret
-  OPNSENSE_BASE_URL       — по умолчанию https://127.0.0.1 (запуск на сервере)
-  OPNSENSE_TUNNEL_NETWORK — CIDR-подсеть для IPv4 Tunnel Network в CSO
-  OPNSENSE_CA             — descr или refid CA для подписания (для --yes режима)
+  OPNSENSE_API_KEY    — API Key
+  OPNSENSE_API_SECRET — API Secret
+  OPNSENSE_BASE_URL   — по умолчанию https://127.0.0.1 (запуск на сервере)
+  OPNSENSE_CA         — descr или refid CA для подписания (для --yes режима)
 
 Запуск:
-  python3 2_create_vpn_certs.py users.json
-  python3 2_create_vpn_certs.py --yes --tunnel 10.8.10.0/24 --ca VPN-Lab-CA users.json
+  python3 2_create_vpn_certs.py users.csv
+  python3 2_create_vpn_certs.py --yes --ca VPN-Lab-CA users.csv
 """
 
 import sys
 import os
-import json
+import csv
 import ssl
+import json
 import base64
 import urllib.request
 import urllib.error
@@ -46,7 +53,7 @@ BASE_URL      = os.environ.get("OPNSENSE_BASE_URL", "https://127.0.0.1")
 CERT_KEYTYPE  = "2048"
 CERT_DIGEST   = "sha256"
 CERT_LIFETIME = "397"
-CERT_TYPE     = "usr_cert"  # usr_cert / server_cert / combined_cert / ca
+CERT_TYPE     = "usr_cert"
 
 # ─────────────────────────────────────────────────────────────────────
 #  ВСПОМОГАТЕЛЬНЫЕ
@@ -88,25 +95,16 @@ def api(path, method="GET", body=None):
 #  MAIN
 # ─────────────────────────────────────────────────────────────────────
 
-AUTO_YES = "--yes" in sys.argv
-
-TUNNEL_FROM_CLI = ""
-CA_FROM_CLI     = ""
-_remaining = []
-_skip = False
-_argv_tail = sys.argv[1:]
+AUTO_YES    = "--yes" in sys.argv
+CA_FROM_CLI = ""
+_remaining  = []
+_skip       = False
+_argv_tail  = sys.argv[1:]
 for i, a in enumerate(_argv_tail):
     if _skip:
         _skip = False
         continue
     if a == "--yes":
-        continue
-    if a == "--tunnel" and i + 1 < len(_argv_tail):
-        TUNNEL_FROM_CLI = _argv_tail[i + 1].strip()
-        _skip = True
-        continue
-    if a.startswith("--tunnel="):
-        TUNNEL_FROM_CLI = a.split("=", 1)[1].strip()
         continue
     if a == "--ca" and i + 1 < len(_argv_tail):
         CA_FROM_CLI = _argv_tail[i + 1].strip()
@@ -139,62 +137,41 @@ if ca_resp is None:
     sys.exit(1)
 ok(f"Подключение к API: {BASE_URL}")
 
-# ── Шаг 1: загрузка JSON ─────────────────────────────────────────────
+# ── Шаг 1: загрузка CSV ──────────────────────────────────────────────
 
 header("Шаг 1: Пользователи")
 
-json_path = args[0] if args else input("  Путь к JSON-файлу: ").strip().strip('"')
-if not os.path.isfile(json_path):
-    err(f"Файл не найден: {json_path}")
+csv_path = args[0] if args else input("  Путь к CSV-файлу: ").strip().strip('"')
+if not os.path.isfile(csv_path):
+    err(f"Файл не найден: {csv_path}")
     sys.exit(1)
 
-with open(json_path, encoding="utf-8") as f:
-    raw = json.load(f)
-
 users = []
-for u in (raw if isinstance(raw, list) else [raw]):
-    username = (u.get("username") or "").strip()
-    if not username:
-        warn("Запись без username — пропущена")
-        continue
-    users.append({
-        "username":     username,
-        "email":        (u.get("email") or f"{username}@lab.local").strip(),
-        "source_group": u.get("source_group", ""),
-    })
+with open(csv_path, encoding="utf-8-sig", newline="") as f:
+    for lineno, row in enumerate(csv.reader(f, delimiter=";"), 1):
+        # пропускаем пустые строки и заголовок (если есть)
+        if not row or row[0].strip().lower() in ("", "login"):
+            continue
+        if len(row) < 2:
+            warn(f"Строка {lineno}: недостаточно колонок — пропускаем")
+            continue
+        login = row[0].strip()
+        ip    = row[1].strip()
+        email = row[2].strip() if len(row) > 2 else ""
+        if not login:
+            warn(f"Строка {lineno}: пустой login — пропускаем")
+            continue
+        if not ip:
+            warn(f"Строка {lineno}: пустой ip — пропускаем")
+            continue
+        users.append({"username": login, "ip": ip, "email": email})
 
 if not users:
     err("Нет валидных записей.")
     sys.exit(1)
 
-print(f"  Файл    : {json_path}")
+print(f"  Файл    : {csv_path}")
 print(f"  Записей : {len(users)}")
-
-# ── Шаг 1.5: tunnel network для CSO ──────────────────────────────────
-
-header("Шаг 1.5: IPv4 Tunnel Network для CSO")
-
-def _valid_cidr(v):
-    return v == "" or ("/" in v and v.count(".") == 3)
-
-TUNNEL_NETWORK = (TUNNEL_FROM_CLI or os.environ.get("OPNSENSE_TUNNEL_NETWORK", "")).strip()
-
-if TUNNEL_NETWORK:
-    if not _valid_cidr(TUNNEL_NETWORK):
-        err(f"Неверный формат tunnel network: {TUNNEL_NETWORK}")
-        sys.exit(1)
-    print(f"  IPv4 Tunnel Network: {TUNNEL_NETWORK} (из аргумента/ENV)")
-elif AUTO_YES:
-    print("  IPv4 Tunnel Network: (не задана, --yes без --tunnel)")
-else:
-    print("  Подсеть в формате CIDR (например 10.8.10.0/24).")
-    print("  Будет применена ко всем создаваемым CSO. Пусто — без подсети.\n")
-    while True:
-        val = input("  IPv4 Tunnel Network: ").strip()
-        if _valid_cidr(val):
-            TUNNEL_NETWORK = val
-            break
-        print("  [!] Неверный формат, ожидается X.X.X.X/Y.")
 
 # ── Шаг 2: выбор CA ──────────────────────────────────────────────────
 
@@ -211,9 +188,9 @@ for i, ca in enumerate(ca_rows, 1):
     print(f"  {i:<4} {ca.get('descr', '?'):<35} {ca.get('refid', '?')}")
 print()
 
-CA_HINT = (CA_FROM_CLI or os.environ.get("OPNSENSE_CA", "")).strip()
-
+CA_HINT   = (CA_FROM_CLI or os.environ.get("OPNSENSE_CA", "")).strip()
 chosen_ca = None
+
 if CA_HINT:
     for ca in ca_rows:
         if ca.get("refid") == CA_HINT or ca.get("descr") == CA_HINT:
@@ -258,15 +235,14 @@ ok(f"OpenVPN сервер: '{first.get('name')}' (vpnid={VPN_ID})")
 
 header("Шаг 3: Подтверждение")
 
-print(f"  {'#':<4} {'username':<25} {'email'}")
-print(f"  {'-'*4} {'-'*25} {'-'*35}")
+print(f"  {'#':<4} {'login':<25} {'ip':<20} {'email'}")
+print(f"  {'-'*4} {'-'*25} {'-'*20} {'-'*30}")
 for i, u in enumerate(users, 1):
-    print(f"  {i:<4} {u['username']:<25} {u['email']}")
+    print(f"  {i:<4} {u['username']:<25} {u['ip']:<20} {u['email']}")
 
 print(f"\n  Будет создано: {len(users)} сертификатов + {len(users)} CSO")
-print(f"  CA            : {chosen_ca.get('descr')} (refid={CA_REFID})")
-print(f"  VPN ID        : {VPN_ID}")
-print(f"  Tunnel Network: {TUNNEL_NETWORK or '(не задана)'}\n")
+print(f"  CA     : {chosen_ca.get('descr')} (refid={CA_REFID})")
+print(f"  VPN ID : {VPN_ID}\n")
 
 if AUTO_YES:
     print("  Создать? [y/N]: y (--yes)")
@@ -278,10 +254,9 @@ elif input("  Создать? [y/N]: ").strip().lower() not in ("y", "yes", "д"
 
 header("Шаг 4: Создание")
 
-existing_cso  = (api("/api/openvpn/client_overwrites/search", method="POST") or {}).get("rows", [])
-existing_cns  = {r.get("common_name") for r in existing_cso}
-
-existing_crts = (api("/api/trust/cert/search", method="POST") or {}).get("rows", [])
+existing_cso    = (api("/api/openvpn/client_overwrites/search", method="POST") or {}).get("rows", [])
+existing_cns    = {r.get("common_name") for r in existing_cso}
+existing_crts   = (api("/api/trust/cert/search", method="POST") or {}).get("rows", [])
 existing_descrs = {r.get("descr") for r in existing_crts}
 
 # ── Шаг 6: создание ──────────────────────────────────────────────────
@@ -290,7 +265,7 @@ results = []
 
 for i, user in enumerate(users, 1):
     username = user["username"]
-    print(f"\n  [{i}/{len(users)}] {username}")
+    print(f"\n  [{i}/{len(users)}] {username}  ({user['ip']})")
 
     if username in existing_descrs:
         warn("Сертификат уже существует — пропускаем")
@@ -298,19 +273,19 @@ for i, user in enumerate(users, 1):
     else:
         cert = api("/api/trust/cert/add", method="POST", body={
             "cert": {
-                "action":         "internal",
-                "descr":          username,
-                "caref":          CA_REFID,
-                "key_type":       CERT_KEYTYPE,
-                "digest":         CERT_DIGEST,
-                "lifetime":       CERT_LIFETIME,
-                "cert_type":      CERT_TYPE,
-                "commonname":     username,
-                "email":          user["email"],
-                "country":        "RU",
-                "state":          "Moscow",
-                "city":           "Moscow",
-                "organization":   "Lab",
+                "action":       "internal",
+                "descr":        username,
+                "caref":        CA_REFID,
+                "key_type":     CERT_KEYTYPE,
+                "digest":       CERT_DIGEST,
+                "lifetime":     CERT_LIFETIME,
+                "cert_type":    CERT_TYPE,
+                "commonname":   username,
+                "email":        user["email"],
+                "country":      "RU",
+                "state":        "Moscow",
+                "city":         "Moscow",
+                "organization": "Lab",
             }
         })
         if cert and cert.get("result") == "saved":
@@ -333,8 +308,8 @@ for i, user in enumerate(users, 1):
             "enabled":        "1",
             "common_name":    username,
             "servers":        VPN_ID,
-            "description":    f"VPN {username} ({user['source_group']})",
-            "tunnel_network": TUNNEL_NETWORK,
+            "description":    f"VPN {username}",
+            "tunnel_network": user["ip"],
         }
     })
     if cso and cso.get("result") == "saved":
