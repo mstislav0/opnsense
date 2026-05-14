@@ -41,7 +41,7 @@ from email import encoders
 #  КОНСТАНТЫ
 # ─────────────────────────────────────────────────────────────────────
 
-BASE_URL      = os.environ.get("OPNSENSE_BASE_URL", "https://127.0.0.1")
+BASE_URL      = os.environ.get("OPNSENSE_BASE_URL", "https://10.18.3.20")
 CERT_KEYTYPE  = "2048"
 CERT_DIGEST   = "sha256"
 CERT_LIFETIME = "397"
@@ -239,10 +239,10 @@ def mode_create(users, ca_resp):
 
     header("Создание")
 
-    existing_cso    = (api("/api/openvpn/client_overwrites/search", method="POST") or {}).get("rows", [])
-    existing_cns    = {r.get("common_name") for r in existing_cso}
-    existing_crts   = (api("/api/trust/cert/search", method="POST") or {}).get("rows", [])
-    existing_descrs = {r.get("descr") for r in existing_crts}
+    existing_cso  = (api("/api/openvpn/client_overwrites/search", method="POST") or {}).get("rows", [])
+    existing_cns  = {r.get("common_name") for r in existing_cso}
+    existing_crts = (api("/api/trust/cert/search", method="POST") or {}).get("rows", [])
+    existing_cert_cns = {r.get("commonname") for r in existing_crts}
 
     results = []
 
@@ -250,8 +250,8 @@ def mode_create(users, ca_resp):
         username = user["username"]
         print(f"\n  [{i}/{len(users)}] {username}  ({user['ip']})")
 
-        if username in existing_descrs:
-            warn("Сертификат уже существует — пропускаем")
+        if username in existing_cert_cns:
+            warn("Сертификат с таким CN уже существует — пропускаем")
             cert_status = "EXISTS"
         else:
             cert = api("/api/trust/cert/add", method="POST", body={
