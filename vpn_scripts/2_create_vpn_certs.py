@@ -553,6 +553,19 @@ if not users:
 print(f"  Файл    : {csv_path}")
 print(f"  Записей : {len(users)}")
 
+# Суффикс email
+no_email_count = sum(1 for u in users if not u["email"])
+if no_email_count:
+    print(f"\n  У {no_email_count} пользователей нет email в CSV.")
+    print("  Введите суффикс для генерации: login@<суффикс>")
+    print("  Пусто — оставить без email.\n")
+    suffix = input("  Email суффикс (например company.ru): ").strip().lstrip("@")
+    if suffix:
+        for u in users:
+            if not u["email"]:
+                u["email"] = f"{u['username']}@{suffix}"
+        ok(f"Email сгенерирован для {no_email_count} пользователей (@{suffix})")
+
 # Шаг 2: выбор режима
 header("Выбор режима")
 print("  1. Создать сертификаты и CSO")
