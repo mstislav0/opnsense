@@ -41,7 +41,7 @@ from email import encoders
 #  КОНСТАНТЫ
 # ─────────────────────────────────────────────────────────────────────
 
-BASE_URL      = os.environ.get("OPNSENSE_BASE_URL", "https://10.18.3.20")
+BASE_URL      = os.environ.get("OPNSENSE_BASE_URL", "https://127.0.0.1")
 CERT_KEYTYPE  = "2048"
 CERT_DIGEST   = "sha256"
 CERT_LIFETIME = "397"
