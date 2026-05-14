@@ -7,9 +7,9 @@
   2. Скачать .ovpn файлы для пользователей из CSV
 
 Формат CSV (разделитель ;):
-  login;ip;email
-  ivanov.ivan;10.8.0.1/32;ivanov@company.ru
-  petrov.petr;10.8.0.2/32;
+  login;ip
+  ivanov.ivan;10.8.0.1/32
+  petrov.petr;10.8.0.2/32
 
 Переменные окружения (опционально):
   OPNSENSE_API_KEY    — API Key
@@ -124,14 +124,13 @@ def load_csv(csv_path):
                 continue
             login = row[0].strip()
             ip    = row[1].strip()
-            email = row[2].strip() if len(row) > 2 else ""
             if not login:
                 warn(f"Строка {lineno}: пустой login — пропускаем")
                 continue
             if not ip:
                 warn(f"Строка {lineno}: пустой ip — пропускаем")
                 continue
-            users.append({"username": login, "ip": ip, "email": email})
+            users.append({"username": login, "ip": ip, "email": ""})
     return users
 
 # ─────────────────────────────────────────────────────────────────────
@@ -554,17 +553,14 @@ print(f"  Файл    : {csv_path}")
 print(f"  Записей : {len(users)}")
 
 # Суффикс email
-no_email_count = sum(1 for u in users if not u["email"])
-if no_email_count:
-    print(f"\n  У {no_email_count} пользователей нет email в CSV.")
-    print("  Введите суффикс для генерации: login@<суффикс>")
-    print("  Пусто — оставить без email.\n")
-    suffix = input("  Email суффикс (например company.ru): ").strip().lstrip("@")
-    if suffix:
-        for u in users:
-            if not u["email"]:
-                u["email"] = f"{u['username']}@{suffix}"
-        ok(f"Email сгенерирован для {no_email_count} пользователей (@{suffix})")
+print()
+print("  Введите суффикс для генерации email: login@<суффикс>")
+print("  Пусто — письма не будут отправляться.\n")
+suffix = input("  Email суффикс (например company.ru): ").strip().lstrip("@")
+if suffix:
+    for u in users:
+        u["email"] = f"{u['username']}@{suffix}"
+    ok(f"Email сгенерирован для {len(users)} пользователей (@{suffix})")
 
 # Шаг 2: выбор режима
 header("Выбор режима")
