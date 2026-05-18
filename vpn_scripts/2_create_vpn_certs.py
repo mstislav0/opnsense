@@ -272,7 +272,7 @@ def mode_create(users, ca_resp):
             })
             if cert and cert.get("result") == "saved":
                 ok(f"Сертификат (uuid={cert.get('uuid','?')})")
-                existing_descrs.add(username)
+                existing_cert_cns.add(username)
                 cert_status = "OK"
             else:
                 err(f"Сертификат не создан: {cert}")
